@@ -1,6 +1,6 @@
 /**
- * Sincroniza SOLO los datos nuevos de la hoja "Cartera",
- * agregando un espacio para "Correo", y los campos "Gestión" y "Estado" por defecto.
+ * Sincroniza los datos de la hoja "Cartera".
+ * INSERTA las facturas nuevas y ACTUALIZA los saldos/abonos de las existentes.
  */
 function sincronizarCarteraSoloNuevos() {
   // --- CONFIGURACIÓN GENERAL ---
@@ -12,6 +12,12 @@ function sincronizarCarteraSoloNuevos() {
   // --- CONFIGURACIÓN DE ÍNDICES DE FACTURA ---
   const IDX_FACTURA_ORIGEN = 3; 
   const COL_FACTURA_DESTINO = 4; 
+
+  // --- CONFIGURACIÓN DE ÍNDICES PARA ACTUALIZAR (Base 0: A=0, B=1, C=2...) ---
+  const IDX_ABONOS = 6;       // Índice para la columna Abonos
+  const IDX_ATRASO = 7;       // Índice para la columna Días de Atraso
+  const IDX_VALOR = 8;        // Índice para la columna Saldo/Valor
+  const IDX_TOTAL_SALDO = 9;  // Índice para la columna Total Saldo
 
   let datosOrigen;
 
@@ -50,50 +56,81 @@ function sincronizarCarteraSoloNuevos() {
   const encabezadosExcel = datosOrigen[0];
   const numColumnasReales = encabezadosExcel.filter(c => String(c).trim() !== "").length;
   
-  const filasOrigen = datosOrigen.slice(1);
-
   // 3. Crear los encabezados de "Correo", "Gestión" y "Estado" en la Fila 1
-  // Asumimos que Correo se insertó justo después de la última columna del Excel
   hojaDestino.getRange(1, numColumnasReales + 1).setValue("CORREO");
   hojaDestino.getRange(1, numColumnasReales + 2).setValue("GESTION");
   hojaDestino.getRange(1, numColumnasReales + 3).setValue("ESTADO");
 
-  // 4. Identificar facturas que YA existen en el destino
-  const ultimaFilaDestino = hojaDestino.getLastRow();
-  let facturasExistentes = new Set(); 
-
-  if (ultimaFilaDestino > 1) {
-    const rangoFacturas = hojaDestino.getRange(2, COL_FACTURA_DESTINO, ultimaFilaDestino - 1, 1).getValues();
-    facturasExistentes = new Set(rangoFacturas.map(f => String(f[0]).trim()));
+  // 4. Leer toda la base de datos de destino
+  const datosDestino = hojaDestino.getDataRange().getValues();
+  
+  // Crear un "mapa" para ubicar rápidamente en qué fila está cada factura existente
+  const mapaDestino = new Map(); 
+  if (datosDestino.length > 1) {
+    // Empezamos en 1 para saltar el encabezado
+    for (let i = 1; i < datosDestino.length; i++) {
+      // COL_FACTURA_DESTINO es 4 (columna D), restamos 1 para el índice de array (3)
+      let numFacturaDestino = String(datosDestino[i][COL_FACTURA_DESTINO - 1]).trim();
+      if (numFacturaDestino !== "") {
+        mapaDestino.set(numFacturaDestino, i); // Guardamos la factura y su índice de fila
+      }
+    }
   }
 
-  // 5. Filtrar las filas del Excel para dejar SOLO las nuevas
-  const registrosNuevos = filasOrigen.filter(fila => {
-    const numFactura = String(fila[IDX_FACTURA_ORIGEN]).trim();
-    return numFactura !== "" && !facturasExistentes.has(numFactura);
-  });
+  const registrosNuevos = [];
+  let facturasActualizadas = 0;
 
-  // 6. Preparar e insertar los datos nuevos
-  if (registrosNuevos.length > 0) {
-    const datosParaInsertar = registrosNuevos.map(fila => {
-      // Recortamos la fila al número exacto de columnas del Excel
-      let nuevaFila = fila.slice(0, numColumnasReales); 
+  // 5. Procesar las filas del Excel para saber cuáles son nuevas y cuáles actualizar
+  for (let i = 1; i < datosOrigen.length; i++) {
+    let filaExcel = datosOrigen[i];
+    let numFacturaOrigen = String(filaExcel[IDX_FACTURA_ORIGEN]).trim();
+
+    if (numFacturaOrigen === "") continue; // Saltar filas vacías
+
+    if (mapaDestino.has(numFacturaOrigen)) {
+      // ✅ ACTUALIZACIÓN: La factura ya existe
+      let indiceEnDestino = mapaDestino.get(numFacturaOrigen);
       
-      // Añadimos las nuevas columnas en el orden exacto de Google Sheets
-      nuevaFila.push("");          // Columna: Correo (Queda en blanco para llenarlo después)
+      // Sobreescribimos solo las columnas de valores
+      datosDestino[indiceEnDestino][IDX_ABONOS] = filaExcel[IDX_ABONOS];
+      datosDestino[indiceEnDestino][IDX_ATRASO] = filaExcel[IDX_ATRASO];
+      datosDestino[indiceEnDestino][IDX_VALOR] = filaExcel[IDX_VALOR];
+      
+      if (filaExcel.length > IDX_TOTAL_SALDO) {
+        datosDestino[indiceEnDestino][IDX_TOTAL_SALDO] = filaExcel[IDX_TOTAL_SALDO];
+      }
+      
+      facturasActualizadas++;
+    } else {
+      // ✅ INSERCIÓN: La factura es nueva
+      let nuevaFila = filaExcel.slice(0, numColumnasReales); 
+      nuevaFila.push("");          // Columna: Correo 
       nuevaFila.push("Pendiente"); // Columna: Gestión
       nuevaFila.push("Abierto");   // Columna: Estado
       
-      return nuevaFila;
-    });
+      registrosNuevos.push(nuevaFila);
+    }
+  }
 
-    // Insertamos justo debajo de la última fila con datos
-    hojaDestino.getRange(ultimaFilaDestino + 1, 1, datosParaInsertar.length, datosParaInsertar[0].length)
-               .setValues(datosParaInsertar);
+  // 6. Guardar los datos actualizados de vuelta a la hoja destino
+  // Esto sobreescribe los datos existentes con los nuevos valores de abonos/saldos de una sola vez
+  hojaDestino.getRange(1, 1, datosDestino.length, datosDestino[0].length).setValues(datosDestino);
 
-    SpreadsheetApp.getActive().toast(`✓ Se añadieron ${datosParaInsertar.length} facturas nuevas.`, "Éxito", 6);
+  // 7. Insertar los registros completamente nuevos al final de la tabla
+  if (registrosNuevos.length > 0) {
+    hojaDestino.getRange(datosDestino.length + 1, 1, registrosNuevos.length, registrosNuevos[0].length)
+               .setValues(registrosNuevos);
+  }
+
+  // 8. Notificaciones de éxito
+  if (registrosNuevos.length > 0 || facturasActualizadas > 0) {
+    SpreadsheetApp.getActive().toast(
+      `✓ ${registrosNuevos.length} facturas nuevas.\n✓ ${facturasActualizadas} facturas actualizadas.`, 
+      "Sincronización Completa", 
+      8
+    );
   } else {
-    SpreadsheetApp.getActive().toast("Toda la cartera esta cargada. No hay registros nuevos.", "Sin cambios", 5);
+    SpreadsheetApp.getActive().toast("Toda la cartera está cargada y al día. No hay cambios.", "Sin cambios", 5);
   }
 }
 /**
