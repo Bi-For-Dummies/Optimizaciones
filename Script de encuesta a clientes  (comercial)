@@ -1,0 +1,88 @@
+function enviarDesdeExcelEnDrive() {
+  // 1. REEMPLAZA ESTO CON EL ID DE TU ARCHIVO EXCEL DE DRIVE
+  var excelFileId = "1dY0jaoOeOzEDnxWE7clpcXlWCcc4caFL"; 
+  
+  // 2. Definir los parámetros del correo y formulario
+  var urlFormulario = "https://docs.google.com/forms/d/e/1FAIpQLSeUg72GCEFrNKihXLbLIzBvDgDf5mGi8BpOF_aXh1_WT9GtLw/viewform?usp=header";
+  var asunto = "Evaluación Trimestral de Servicio - Encuesta de Satisfacción";
+  
+  // 3. CONVERSIÓN TEMPORAL EN LA NUBE
+  var file = DriveApp.getFileById(excelFileId);
+  var config = {
+    title: "[TEMPORAL] " + file.getName(),
+    parents: file.getParents()
+  };
+  
+  // Conversión oculta de Excel a Google Sheets
+  var temporalSheetFile = Drive.Files.insert(config, file.getBlob(), {convert: true});
+  var tempSpreadsheet = SpreadsheetApp.openById(temporalSheetFile.id);
+  
+  // 4. LEER LA PRIMERA PESTAÑA
+  var sheet = tempSpreadsheet.getSheets()[0]; 
+  var data = sheet.getDataRange().getValues();
+  
+  // 5. VARIABLES DE CONTROL
+  var correosEnviados = 0;
+  var filasSaltadasVacias = 0;
+  
+  // Mapeo de columnas según tu especificación (Base 0)
+  var colCodigo = 0;   // 🚀 NUEVO: Columna A (Código del cliente)
+  var colNombre = 2;   // Columna C (Nombre de la empresa)
+  var colCorreo = 37;  // Columna AL (Correo electrónico)
+  
+  // 6. CICLO DE ENVÍO INTELIGENTE (Empezamos en i = 2 para omitir fila 1 y fila 2 de encabezados)
+  for (var i = 2; i < data.length; i++) {
+    var codigoCliente = data[i][colCodigo]; // 🚀 NUEVO: Captura el código interno de la columna A
+    var nombreEmpresa = data[i][colNombre]; 
+    var correoCliente = data[i][colCorreo]; 
+    
+    // Convertimos a texto y eliminamos espacios en blanco accidentales a los lados
+    if (correoCliente) {
+      correoCliente = correoCliente.toString().trim();
+    }
+    
+    // 🚀 REGLA DE GOBERNANZA: Validar que el correo NO esté vacío y contenga un arroba '@'
+    if (correoCliente && correoCliente !== "" && correoCliente.indexOf("@") !== -1) {
+      
+      // 🚀 CUERPO DEL CORREO: Modificado dinámicamente para incluir el código de cliente
+      var cuerpo = "Estimado/a cliente " + nombreEmpresa + ",\n\n" +
+                   "En nuestro compromiso constante por ofrecerle el mejor servicio,\n" +
+                   "queremos invitarle a participar en nuestra encuesta de satisfacción trimestral.\n\n" +
+                   "💡 Para diligenciar el formulario, el sistema le solicitará su código interno de cliente.\n" +
+                   "Su código asignado es: " + codigoCliente + "\n\n" +
+                   "Agradecemos su apoyo diligenciando el siguiente formulario (le tomará menos de 3 minutos):\n" +
+                   urlFormulario + "\n\n" +
+                   "Atentamente,\nEl Equipo comercial de Asservi.";
+      
+      // Envío por Gmail
+      MailApp.sendEmail({
+        to: correoCliente,
+        subject: asunto,
+        body: cuerpo
+      });
+      
+      correosEnviados++;
+    } else {
+      // Si la celda está vacía o no tiene estructura de correo, la cuenta aquí
+      filasSaltadasVacias++;
+    }
+  }
+  
+  // 7. LIMPIEZA TOTAL: Borramos el archivo temporal para liberar espacio en Drive
+  DriveApp.getFileById(temporalSheetFile.id).setTrashed(true);
+  
+  // Mensaje final detallado para auditoría interna
+  var mensajeExito = "¡Proceso terminado con éxito!\n\n" +
+                     "📊 Resumen de la ejecución:\n" +
+                     "• Correos enviados exitosamente: " + correosEnviados + "\n" +
+                     "• Filas omitidas (celdas vacías o inválidas): " + filasSaltadasVacias;
+                     
+  SpreadsheetApp.getUi().alert(mensajeExito);
+}
+
+// Crear el menú interactivo en la barra superior
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('🚀 Automatización Comercial')
+      .addItem('Disparar Correos desde Excel', 'enviarDesdeExcelEnDrive')
+      .addToUi();
+}
