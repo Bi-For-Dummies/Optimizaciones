@@ -1,0 +1,135 @@
+/**
+ * BACKEND MAESTRO DE AUTOMATIZACIÓN PARA EL ÁREA DE COMUNICACIONES
+
+ * Evento que se ejecuta automáticamente cuando entra una nueva fila desde el formulario.
+ */
+function alEnviarFormulario(e) {
+  var hoja = e.source.getActiveSheet();
+  var fila = e.range.getRow();
+  
+  // 1. Leer las cabeceras de la fila 1 para mapeo dinámico
+  var cabeceras = hoja.getRange(1, 1, 1, hoja.getLastColumn()).getValues()[0];
+  var valores = e.values;
+  
+// 2. Algoritmo para generar el ID numérico secuencial (1, 2, 3...)
+  var colId = encontrarColumna(cabeceras, "Id");
+  if (colId > 0) {
+    // Obtenemos el número de filas que ya tienen datos
+    var ultimaFila = hoja.getLastRow();
+    // Si la hoja solo tiene cabeceras, el primer ID será 1
+    var nuevoId = (ultimaFila === 1) ? 1 : (ultimaFila - 1);
+    
+    hoja.getRange(fila, colId).setValue(nuevoId);
+  }
+  
+  // 3. Algoritmo para establecer el Estado Inicial automático
+  var colEstado = encontrarColumna(cabeceras, "Estado de la solicitud");
+  if (colEstado > 0) {
+    hoja.getRange(fila, colEstado).setValue("Pendiente");
+  }
+  
+  // 4. Filtro de exclusión de datos para el correo ejecutivo
+  var camposAExcluir = ["Marca temporal", "Formato solicitado", "Aprobador responsable", "Id", "Estado de la solicitud", "Fecha de cierre", "Gestión de la solicitud"];
+  
+  var cuerpoCorreo = "Hola,\n\nHa llegado un nuevo requerimiento al área de comunicaciones. A continuación, se presentan los detalles del pedido:\n\n";
+  
+  // Bucle para armar el cuerpo del correo dinámicamente
+  for (var i = 0; i < cabeceras.length; i++) {
+    // Limpiar posibles subtítulos o saltos de línea de las preguntas del formulario
+    var cabeceraLimpia = cabeceras[i].split("\n")[0].trim();
+    
+    if (camposAExcluir.indexOf(cabeceraLimpia) === -1 && valores[i]) {
+      cuerpoCorreo += "* " + cabeceraLimpia + ": " + valores[i] + "\n";
+    }
+  }
+  
+  // Inyección del enlace directo al Google Sheets al final del cuerpo
+  cuerpoCorreo += "\n------------------------------------------\n";
+  cuerpoCorreo += "Para más detalles consulta el Google Sheets: " + e.source.getUrl();
+  
+  // 5. Configuración de envío con enmascaramiento e identidad virtual
+  var correoDestinoComunicaciones = "comunicaciones@aseoplus.com.co"; // <-- REEMPLAZAR CON CORREO REAL
+  var idxProducto = encontrarColumna(cabeceras, "Producto solicitado") - 1;
+  var productoSeleccionado = idxProducto >= 0 ? valores[idxProducto] : "Nuevo Pedido";
+  
+  MailApp.sendEmail({
+    to: correoDestinoComunicaciones,
+    subject: "Nuevo requerimiento: " + productoSeleccionado,
+    name: "Sistema de Gestión de Comunicaciones",
+    replyTo: correoDestinoComunicaciones,
+    body: cuerpoCorreo
+  });
+}
+
+/**
+ * Evento que se ejecuta automáticamente cuando la chica de comunicaciones edita la hoja.
+ */
+function alEditarHoja(e) {
+  var rango = e.range;
+  var hoja = rango.getSheet();
+  var fila = rango.getRow();
+  
+  // Ignorar si se edita la fila de títulos
+  if (fila === 1) return;
+  
+  var cabeceras = hoja.getRange(1, 1, 1, hoja.getLastColumn()).getValues()[0];
+  var colEstado = encontrarColumna(cabeceras, "Estado de la solicitud");
+  
+  // Ejecutar lógica solo si la celda editada pertenece a la columna "Estado de la solicitud"
+  if (rango.getColumn() === colEstado) {
+    var nuevoEstado = e.value;
+    var colCorreo = encontrarColumna(cabeceras, "Dirección de correo electrónico");
+    var correoSolicitante = hoja.getRange(fila, colCorreo).getValue();
+    
+    // Si no hay correo de solicitante válido, abortar ejecución de mensajería
+    if (!correoSolicitante) return;
+    
+    var correoDestinoComunicaciones = "comunicaciones@aseoplus.com.co"; // <-- REEMPLAZAR CON CORREO REAL
+    var asunto = "Actualización de tu solicitud de comunicaciones";
+    var cuerpo = "";
+    
+    if (nuevoEstado === "Finalizado") {
+      // Registrar de forma automática la fecha y hora de cierre
+      var colFechaCierre = encontrarColumna(cabeceras, "Fecha de cierre");
+      if (colFechaCierre > 0) {
+        hoja.getRange(fila, colFechaCierre).setValue(new Date());
+      }
+      
+      // Extraer el texto explicativo de la columna "Gestión de la solicitud"
+      var colGestion = encontrarColumna(cabeceras, "Gestión de la solicitud");
+      var gestionTexto = hoja.getRange(fila, colGestion).getValue();
+      
+      cuerpo = "Hola,\n\nTe informamos que tu solicitud de comunicaciones ha sido completada con éxito.\n\n" +
+               "Detalles de la gestión realizada por el equipo:\n" + 
+               (gestionTexto ? gestionTexto : "No se especificaron detalles adicionales.") + "\n\n" +
+               "Atentamente,\nÁrea de Comunicaciones.";
+               
+    } else if (nuevoEstado === "En curso") {
+      cuerpo = "Hola,\n\nTe informamos que tu solicitud de comunicaciones ya se encuentra en estado: EN CURSO. El equipo técnico ha comenzado a trabajar en el desarrollo de tu requerimiento.\n\n" +
+               "Atentamente,\nÁrea de Comunicaciones.";
+    }
+    
+    // Si el estado es válido para notificación, despachar el correo
+    if (cuerpo !== "") {
+      MailApp.sendEmail({
+        to: correoSolicitante,
+        subject: asunto,
+        name: "Área de Comunicaciones",
+        replyTo: correoDestinoComunicaciones,
+        body: cuerpo
+      });
+    }
+  }
+}
+
+/**
+ * FUNCIÓN HELPER: Busca una cabecera de forma tolerante, ignorando mayúsculas, minúsculas o textos largos.
+ */
+function encontrarColumna(cabeceras, nombreBuscado) {
+  for (var i = 0; i < cabeceras.length; i++) {
+    if (cabeceras[i].toLowerCase().indexOf(nombreBuscado.toLowerCase()) !== -1) {
+      return i + 1; // Retorna índice base 1 para métodos de Google Sheets
+    }
+  }
+  return -1; // Retorna -1 si ocurre un error sintáctico en la cabecera
+}
