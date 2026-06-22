@@ -1,6 +1,6 @@
 /**
  * Sincroniza los datos del archivo CSV de Cartera (Estructura de 70 columnas).
- * Extrae los valores por posiciones fijas absolutas, limpia números y evita duplicados internos.
+ * Extrae valores, limpia números, evita duplicados y MARCA COMO PAGADAS (Saldo $0) las facturas cerradas.
  */
 function sincronizarCarteraSoloNuevos() {
   // --- CONFIGURACIÓN GENERAL ---
@@ -73,7 +73,7 @@ function sincronizarCarteraSoloNuevos() {
   const registrosNuevos = [];
   let facturasActualizadas = 0;
   
-  // 🛡️ ESCUDO ANTI-DUPLICADOS INTERNOS
+  // ESCUDO ANTI-DUPLICADOS INTERNOS Y REGISTRO DE FACTURAS VIGENTES
   const facturasProcesadasEnEsteCSV = new Set();
 
   // 5. PROCESAR FILAS DEL CSV
@@ -86,12 +86,10 @@ function sincronizarCarteraSoloNuevos() {
 
     if (numFacturaOrigen === "" || isNaN(numFacturaOrigen)) continue; 
     
-    // Si la factura ya la leímos líneas más arriba en este mismo archivo, la ignoramos
     if (facturasProcesadasEnEsteCSV.has(numFacturaOrigen)) continue;
     facturasProcesadasEnEsteCSV.add(numFacturaOrigen);
 
     let valCorte      = String(filaCSV[idxOrigen.CORTE]).trim();
-    
     let valValor      = limpiarNumero(filaCSV[idxOrigen.VALOR]);
     let valAbonos     = limpiarNumero(filaCSV[idxOrigen.ABONOS]);
     let valAtraso     = limpiarNumero(filaCSV[idxOrigen.ATRASO]);
@@ -137,7 +135,27 @@ function sincronizarCarteraSoloNuevos() {
     }
   }
 
-  // 6. INSERTAR REGISTROS NUEVOS
+  // 6. DETECTAR FACTURAS PAGADAS (Las que están en la hoja pero no en el CSV)
+  let facturasPagadas = 0;
+  for (let [numFacturaDestino, filaRealDestino] of mapaDestino.entries()) {
+    if (!facturasProcesadasEnEsteCSV.has(numFacturaDestino)) {
+      let gestionActual = String(datosDestino[filaRealDestino - 1][COL_DESTINO.GESTION - 1]).trim().toUpperCase();
+      
+      // Si no estaba pagada, la actualizamos
+      if (gestionActual !== "PAGADA") {
+        hojaDestino.getRange(filaRealDestino, COL_DESTINO.GESTION).setValue("PAGADA");
+        hojaDestino.getRange(filaRealDestino, COL_DESTINO.ESTADO).setValue("CERRADO");
+        
+        // ✅ PONEMOS LOS SALDOS EN CERO PARA QUE EL TOTAL CUADRE
+        hojaDestino.getRange(filaRealDestino, COL_DESTINO.SALDO).setValue(0);
+        hojaDestino.getRange(filaRealDestino, COL_DESTINO.TOTAL_SALDO).setValue(0);
+        
+        facturasPagadas++;
+      }
+    }
+  }
+
+  // 7. INSERTAR REGISTROS NUEVOS
   if (registrosNuevos.length > 0) {
     let ultimaFilaDestino = hojaDestino.getLastRow();
     if (ultimaFilaDestino === 0) ultimaFilaDestino = 1; 
@@ -148,12 +166,12 @@ function sincronizarCarteraSoloNuevos() {
 
   SpreadsheetApp.flush();
 
-  // 7. NOTIFICACIONES
-  if (registrosNuevos.length > 0 || facturasActualizadas > 0) {
+  // 8. NOTIFICACIONES
+  if (registrosNuevos.length > 0 || facturasActualizadas > 0 || facturasPagadas > 0) {
     SpreadsheetApp.getActive().toast(
-      `✓ ${registrosNuevos.length} facturas nuevas.\n✓ ${facturasActualizadas} facturas actualizadas.`, 
+      `✓ ${registrosNuevos.length} nuevas.\n✓ ${facturasActualizadas} actualizadas.\n✓ ${facturasPagadas} marcadas como PAGADAS.`, 
       "Sincronización Completa", 
-      8
+      10
     );
   } else {
     SpreadsheetApp.getActive().toast("Toda la cartera está cargada y al día. No hay cambios.", "Sin cambios", 5);
