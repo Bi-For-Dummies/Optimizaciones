@@ -1,49 +1,41 @@
 /**
- * Sincroniza los datos de la hoja "Cartera".
- * INSERTA las facturas nuevas y ACTUALIZA los saldos/abonos de las existentes.
+ * Sincroniza los datos del archivo CSV de Cartera (Estructura de 70 columnas).
+ * Extrae los valores por posiciones fijas absolutas, limpia números y evita duplicados internos.
  */
 function sincronizarCarteraSoloNuevos() {
   // --- CONFIGURACIÓN GENERAL ---
-  const ID_EXCEL_ORIGEN = "1ptbn2cBQh9jfSlt0_1In9kmUFJ9KAX70"; 
-  const NOMBRE_HOJA_EXCEL = "Cartera";
+  const ID_CSV_ORIGEN = "1M5dWA8WDhfGnNBxXwmCHDB0sopZIeMhN"; 
   const ID_DESTINO = "1z5W97VUbtH6Zlzgq4hEKyoqp5P4R2WGTrG1l1f-D88E"; 
   const NOMBRE_HOJA_DESTINO = "gestion_cartera"; 
 
-  // --- CONFIGURACIÓN DE ÍNDICES DE FACTURA ---
-  const IDX_FACTURA_ORIGEN = 3; 
-  const COL_FACTURA_DESTINO = 4; 
-
-  // --- CONFIGURACIÓN DE ÍNDICES PARA ACTUALIZAR (Base 0: A=0, B=1, C=2...) ---
-  const IDX_ABONOS = 6;       // Índice para la columna Abonos
-  const IDX_ATRASO = 7;       // Índice para la columna Días de Atraso
-  const IDX_VALOR = 8;        // Índice para la columna Saldo/Valor
-  const IDX_TOTAL_SALDO = 9;  // Índice para la columna Total Saldo
-
   let datosOrigen;
 
+  // 1. LEER EL ARCHIVO CSV
   try {
-    const blob = DriveApp.getFileById(ID_EXCEL_ORIGEN).getBlob();
-    const tempFile = DriveApp.createFile(blob);
-    const converted = Drive.Files.copy({
-      mimeType: MimeType.GOOGLE_SHEETS,
-      title: "TEMP_CARTERA_SYNC"
-    }, tempFile.getId());
-
-    const ssTemp = SpreadsheetApp.openById(converted.id);
-    const hojaOrigen = ssTemp.getSheetByName(NOMBRE_HOJA_EXCEL);
-    
-    if (!hojaOrigen) throw new Error("No se encontró la pestaña '" + NOMBRE_HOJA_EXCEL + "'");
-    
-    datosOrigen = hojaOrigen.getDataRange().getValues();
-
-    DriveApp.getFileById(tempFile.getId()).setTrashed(true);
-    Drive.Files.remove(converted.id);
-
+    const blob = DriveApp.getFileById(ID_CSV_ORIGEN).getBlob();
+    const csvTexto = blob.getDataAsString(); 
+    datosOrigen = Utilities.parseCsv(csvTexto, ','); 
   } catch (e) {
-    SpreadsheetApp.getUi().alert("❌ Error procesando el archivo origen: " + e.message);
+    SpreadsheetApp.getUi().alert("❌ Error procesando el archivo CSV: " + e.message);
     return;
   }
 
+  // 2. POSICIONES EXACTAS DEL ARCHIVO
+  const idxOrigen = {
+    CORTE: 2,           
+    NIT: 29,            
+    CENTRO_COSTO: 30,   
+    FACTURA: 35,        
+    EMISION: 39,        
+    VALOR: 41,          
+    ABONOS: 42,         
+    ATRASO: 43,         
+    SALDO: 50,          
+    TOTAL_SALDO: 51,    
+    COD_CC: 33          
+  };
+
+  // 3. CONFIGURAR HOJA DE DESTINO
   const ssDestino = SpreadsheetApp.openById(ID_DESTINO);
   const hojaDestino = ssDestino.getSheetByName(NOMBRE_HOJA_DESTINO);
 
@@ -52,77 +44,111 @@ function sincronizarCarteraSoloNuevos() {
     return;
   }
 
-  // 2. Separar datos de origen y contar columnas REALES del Excel
-  const encabezadosExcel = datosOrigen[0];
-  const numColumnasReales = encabezadosExcel.filter(c => String(c).trim() !== "").length;
-  
-  // 3. Crear los encabezados de "Correo", "Gestión" y "Estado" en la Fila 1
-  hojaDestino.getRange(1, numColumnasReales + 1).setValue("CORREO");
-  hojaDestino.getRange(1, numColumnasReales + 2).setValue("GESTION");
-  hojaDestino.getRange(1, numColumnasReales + 3).setValue("ESTADO");
+  const COL_DESTINO = {
+    CORTE: 1, FACTURA: 4, VALOR: 6, ABONOS: 7, ATRASO: 8, SALDO: 9, TOTAL_SALDO: 10,
+    CORREO: 12, GESTION: 13, ESTADO: 14, SEGUIMIENTO: 15
+  };
 
-  // 4. Leer toda la base de datos de destino
+  // 4. MAPEAR FACTURAS EXISTENTES EN DESTINO
   const datosDestino = hojaDestino.getDataRange().getValues();
-  
-  // Crear un "mapa" para ubicar rápidamente en qué fila está cada factura existente
   const mapaDestino = new Map(); 
+  
   if (datosDestino.length > 1) {
-    // Empezamos en 1 para saltar el encabezado
     for (let i = 1; i < datosDestino.length; i++) {
-      // COL_FACTURA_DESTINO es 4 (columna D), restamos 1 para el índice de array (3)
-      let numFacturaDestino = String(datosDestino[i][COL_FACTURA_DESTINO - 1]).trim();
+      let numFacturaDestino = String(datosDestino[i][COL_DESTINO.FACTURA - 1]).trim();
       if (numFacturaDestino !== "") {
-        mapaDestino.set(numFacturaDestino, i); // Guardamos la factura y su índice de fila
+        mapaDestino.set(numFacturaDestino, i + 1);
       }
     }
   }
 
+  // FUNCIÓN LIMPIADORA DE NÚMEROS
+  const limpiarNumero = (texto) => {
+    if (!texto) return 0;
+    let limpio = String(texto).replace(/,/g, '').trim();
+    let numero = parseFloat(limpio);
+    return isNaN(numero) ? 0 : numero;
+  };
+
   const registrosNuevos = [];
   let facturasActualizadas = 0;
+  
+  // 🛡️ ESCUDO ANTI-DUPLICADOS INTERNOS
+  const facturasProcesadasEnEsteCSV = new Set();
 
-  // 5. Procesar las filas del Excel para saber cuáles son nuevas y cuáles actualizar
-  for (let i = 1; i < datosOrigen.length; i++) {
-    let filaExcel = datosOrigen[i];
-    let numFacturaOrigen = String(filaExcel[IDX_FACTURA_ORIGEN]).trim();
+  // 5. PROCESAR FILAS DEL CSV
+  for (let i = 0; i < datosOrigen.length; i++) {
+    let filaCSV = datosOrigen[i];
+    
+    if (filaCSV.length < 55) continue; 
 
-    if (numFacturaOrigen === "") continue; // Saltar filas vacías
+    let numFacturaOrigen = String(filaCSV[idxOrigen.FACTURA]).trim();
+
+    if (numFacturaOrigen === "" || isNaN(numFacturaOrigen)) continue; 
+    
+    // Si la factura ya la leímos líneas más arriba en este mismo archivo, la ignoramos
+    if (facturasProcesadasEnEsteCSV.has(numFacturaOrigen)) continue;
+    facturasProcesadasEnEsteCSV.add(numFacturaOrigen);
+
+    let valCorte      = String(filaCSV[idxOrigen.CORTE]).trim();
+    
+    let valValor      = limpiarNumero(filaCSV[idxOrigen.VALOR]);
+    let valAbonos     = limpiarNumero(filaCSV[idxOrigen.ABONOS]);
+    let valAtraso     = limpiarNumero(filaCSV[idxOrigen.ATRASO]);
+    let valSaldo      = limpiarNumero(filaCSV[idxOrigen.SALDO]);
+    let valTotalSaldo = limpiarNumero(filaCSV[idxOrigen.TOTAL_SALDO]);
+    
+    let codCCRaw      = String(filaCSV[idxOrigen.COD_CC]);
+    let valCodCC      = codCCRaw.replace(/Centro De Costo:/i, "").trim();
 
     if (mapaDestino.has(numFacturaOrigen)) {
-      // ✅ ACTUALIZACIÓN: La factura ya existe
-      let indiceEnDestino = mapaDestino.get(numFacturaOrigen);
+      // ACTUALIZACIÓN
+      let filaRealDestino = mapaDestino.get(numFacturaOrigen);
       
-      // Sobreescribimos solo las columnas de valores
-      datosDestino[indiceEnDestino][IDX_ABONOS] = filaExcel[IDX_ABONOS];
-      datosDestino[indiceEnDestino][IDX_ATRASO] = filaExcel[IDX_ATRASO];
-      datosDestino[indiceEnDestino][IDX_VALOR] = filaExcel[IDX_VALOR];
-      
-      if (filaExcel.length > IDX_TOTAL_SALDO) {
-        datosDestino[indiceEnDestino][IDX_TOTAL_SALDO] = filaExcel[IDX_TOTAL_SALDO];
-      }
+      hojaDestino.getRange(filaRealDestino, COL_DESTINO.CORTE).setValue(valCorte);
+      hojaDestino.getRange(filaRealDestino, COL_DESTINO.VALOR).setValue(valValor);
+      hojaDestino.getRange(filaRealDestino, COL_DESTINO.ABONOS).setValue(valAbonos);
+      hojaDestino.getRange(filaRealDestino, COL_DESTINO.ATRASO).setValue(valAtraso);
+      hojaDestino.getRange(filaRealDestino, COL_DESTINO.SALDO).setValue(valSaldo);
+      hojaDestino.getRange(filaRealDestino, COL_DESTINO.TOTAL_SALDO).setValue(valTotalSaldo);
       
       facturasActualizadas++;
     } else {
-      // ✅ INSERCIÓN: La factura es nueva
-      let nuevaFila = filaExcel.slice(0, numColumnasReales); 
-      nuevaFila.push("");          // Columna: Correo 
-      nuevaFila.push("Pendiente"); // Columna: Gestión
-      nuevaFila.push("Abierto");   // Columna: Estado
+      // INSERCIÓN
+      let nuevaFila = [
+        valCorte,                                             
+        String(filaCSV[idxOrigen.NIT]).trim(),                
+        String(filaCSV[idxOrigen.CENTRO_COSTO]).trim(),       
+        numFacturaOrigen,                                     
+        String(filaCSV[idxOrigen.EMISION]).trim(),            
+        valValor,                                             
+        valAbonos,                                            
+        valAtraso,                                            
+        valSaldo,                                             
+        valTotalSaldo,                                        
+        valCodCC,                                             
+        "",                                                   
+        "PENDIENTE",                                          
+        "ABIERTO",                                            
+        ""                                                    
+      ];
       
       registrosNuevos.push(nuevaFila);
     }
   }
 
-  // 6. Guardar los datos actualizados de vuelta a la hoja destino
-  // Esto sobreescribe los datos existentes con los nuevos valores de abonos/saldos de una sola vez
-  hojaDestino.getRange(1, 1, datosDestino.length, datosDestino[0].length).setValues(datosDestino);
-
-  // 7. Insertar los registros completamente nuevos al final de la tabla
+  // 6. INSERTAR REGISTROS NUEVOS
   if (registrosNuevos.length > 0) {
-    hojaDestino.getRange(datosDestino.length + 1, 1, registrosNuevos.length, registrosNuevos[0].length)
+    let ultimaFilaDestino = hojaDestino.getLastRow();
+    if (ultimaFilaDestino === 0) ultimaFilaDestino = 1; 
+    
+    hojaDestino.getRange(ultimaFilaDestino + 1, 1, registrosNuevos.length, registrosNuevos[0].length)
                .setValues(registrosNuevos);
   }
 
-  // 8. Notificaciones de éxito
+  SpreadsheetApp.flush();
+
+  // 7. NOTIFICACIONES
   if (registrosNuevos.length > 0 || facturasActualizadas > 0) {
     SpreadsheetApp.getActive().toast(
       `✓ ${registrosNuevos.length} facturas nuevas.\n✓ ${facturasActualizadas} facturas actualizadas.`, 
