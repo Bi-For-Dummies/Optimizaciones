@@ -1,0 +1,120 @@
+/**
+ * Se ejecuta al recibir una respuesta del formulario.
+ */
+function alEnviarFormulario(e) {
+  var hoja = e.range.getSheet();
+  var filaActual = e.range.getRow();
+  
+  // 1. Ponemos "Pendiente" en la columna P (16)
+  hoja.getRange(filaActual, 16).setValue("Pendiente");
+  
+  // 2. Obtenemos los datos de la fila
+  var idSolicitud = hoja.getRange(filaActual, 2).getValue(); 
+  var nombreSolicitante = hoja.getRange(filaActual, 3).getValue();
+  var correoSolicitante = hoja.getRange(filaActual, 7).getValue();
+  var descripcion = hoja.getRange(filaActual, 6).getValue();
+
+  // 3. Enviar correo de confirmación inicial al solicitante (Mantiene el ALIAS)
+  var cuerpoMensaje = "Hola, " + nombreSolicitante + ":\n\n" +
+                "Confirmamos la recepción de tu solicitud para el área de Inteligencia y Analítica empresarial.\n\n" +
+                "Detalles de tu Solicitud:\n" +
+                "ID de Solicitud: " + idSolicitud + "\n" +
+                "Descripción: " + descripcion + "\n" +
+                "Estado Actual: Pendiente";
+  
+  GmailApp.sendEmail(correoSolicitante, "Confirmación de Solicitud: " + idSolicitud, cuerpoMensaje, {
+    from: "dir.inteligencia@asservi.com",
+    name: "Inteligencia y Analítica Empresarial"
+  });
+
+  // 4. Correo de notificación interno para el líder del área
+  var correoDestinoInterno = "dir.inteligencia@asservi.com";
+  var asuntoInterno = "NUEVA SOLICITUD RECIBIDA - ID: " + idSolicitud;
+  
+  var cuerpoNotificacionInterna = "Buen día,\n\n" +
+                "Se ha registrado un nuevo requerimiento en el portal de servicios.\n\n" +
+                "Detalles para asignación técnica:\n" +
+                "- ID de Solicitud: " + idSolicitud + "\n" +
+                "- Solicitante: " + nombreSolicitante + "\n" +
+                "- Correo de contacto: " + correoSolicitante + "\n" +
+                "- Descripción del pedido: " + descripcion + "\n\n" +
+                "Por favor, ingrese al Google Sheets de gestión para asignar un responsable.";
+
+  // NOTA: Sin el parámetro "from" para que viaje de ti hacia él (carpeta Enviados)
+  // El nombre se cambió a "Inteligencia y Analítica" según lo solicitado
+  GmailApp.sendEmail(correoDestinoInterno, asuntoInterno, cuerpoNotificacionInterna, {
+    name: "Inteligencia y Analítica"
+  });
+}
+
+/**
+ * Se ejecuta al editar manualmente el Estado o el Responsable.
+ */
+function alEditarCelda(e) {
+  var hoja = e.source.getActiveSheet();
+  var rango = e.range;
+  var fila = rango.getRow();
+  var columna = rango.getColumn();
+  
+  if (fila < 2) return; 
+
+  var idSolicitud = hoja.getRange(fila, 2).getValue();
+  var nombreSolicitante = hoja.getRange(fila, 3).getValue();
+  var correoSolicitante = hoja.getRange(fila, 7).getValue();
+
+  // CASO A: Se cambió el ESTADO (Columna 16 - P)
+  if (columna == 16) {
+    var nuevoEstado = rango.getValue();
+    var celdaFechaCierre = hoja.getRange(fila, 17); // Columna Q (17)
+    
+    // --- PARTE 1: Mensaje base que se envía SIEMPRE ---
+    var asuntoUser = "Actualización de tu solicitud: " + idSolicitud;
+    var cuerpoUser = "Hola " + nombreSolicitante + ",\n\n" +
+                     "Te informamos que el estado de tu requerimiento con ID " + idSolicitud + 
+                     " ha cambiado a: " + nuevoEstado + ".";
+
+    // --- PARTE 2: Si es 'Finalizado', agregamos Fecha y la Descripción de la columna H ---
+    if (nuevoEstado == "Finalizado") {
+      // Poner fecha de cierre
+      var fechaTexto = Utilities.formatDate(new Date(), "GMT-5", "dd/MM/yyyy");
+      celdaFechaCierre.setValue(fechaTexto); 
+
+      // Obtener gestión de la columna H (8)
+      var gestionRealizada = hoja.getRange(fila, 8).getValue();
+      if (gestionRealizada != "") {
+        // Esto solo se suma al correo si el estado es Finalizado
+        cuerpoUser += "\n\nDetalle de la gestión realizada:\n" + gestionRealizada;
+      }
+      cuerpoUser += "\n\nGracias por confiar en el equipo de Inteligencia y Analítica.";
+      
+    } else {
+      // Si no es Finalizado, borramos fecha de cierre por si acaso
+      celdaFechaCierre.clearContent();
+    }
+
+    // --- PARTE 3: Envío del correo final (Sea cual sea el estado) ---
+    GmailApp.sendEmail(correoSolicitante, asuntoUser, cuerpoUser, {
+      from: "dir.inteligencia@asservi.com",
+      name: "Inteligencia y Analítica Empresarial"
+    });
+  }
+
+  // CASO B: Se asignó un RESPONSABLE (Columna 15 - O)
+  if (columna == 15) {
+    var correoResponsable = rango.getValue();
+    if (correoResponsable && correoResponsable.includes("@")) {
+      var detalleAsunto = hoja.getRange(fila, 6).getValue();
+      var asuntoTecnico = "NUEVA TAREA ASIGNADA - ID " + idSolicitud;
+      var cuerpoTecnico = "Se te ha asignado un nuevo requerimiento en el sistema.\n\n" +
+                          "ID: " + idSolicitud + "\n" +
+                          "Solicitante: " + nombreSolicitante + "\n" +
+                          "Descripción: " + detalleAsunto + "\n\n" +
+                          "Por favor, revisa el google sheets para más detalles.";
+      
+      GmailApp.sendEmail(correoResponsable, asuntoTecnico, cuerpoTecnico, {
+        from: "dir.inteligencia@asservi.com",
+        name: "Inteligencia y Analítica Empresarial"
+      });
+    }
+  }
+}
