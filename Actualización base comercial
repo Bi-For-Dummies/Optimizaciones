@@ -1,0 +1,166 @@
+// ============================================================
+//  CONFIGURACIÓN — Modifica el ID según tu archivo original
+// ============================================================
+const ID_EXCEL_DRIVE    = "1ptbn2cBQh9jfSlt0_1In9kmUFJ9KAX70"; // ID de tu archivo Excel de origen
+
+// Nombres de las hojas en el archivo destino (Google Sheets actual)
+const NOMBRE_HOJA_DESTINO_EMP = "BD empleados";
+const NOMBRE_HOJA_DESTINO_CC  = "BD centros de costos";
+
+// Nombres de las hojas en el archivo Excel de origen
+const NOMBRE_HOJA_ORIGEN_EMP  = "Empleados";           
+const NOMBRE_HOJA_ORIGEN_CC   = "Centros de costo";    
+
+// Columnas requeridas para Empleados
+const COL_CONTRATO   = "Contrato";            
+const COL_CEDULA     = "Cedula"; 
+const COLS_A_TRAER_EMP = ["Cedula", "Nombre", "cod.CC", "Centro.De.Costos", "Cargo", "Retirado"];
+
+// Columnas requeridas para Centros de Costo
+const COLS_A_TRAER_CC = ["Código", "Descripción"];
+// ============================================================
+
+/**
+ * Crea el menú manual al abrir el archivo de Google Sheets
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("🔄")
+    .addItem("Actualizar bases de datos", "actualizarBasesManual")
+    .addToUi();
+}
+
+/**
+ * Ejecución manual desde el menú (con avisos visuales)
+ */
+function actualizarBasesManual() {
+  SpreadsheetApp.getActive().toast("Iniciando actualización...", "Espere", 3);
+  actualizarBasesAutomatica();
+  SpreadsheetApp.getActive().toast("✓ Proceso ejecutado.", "Info", 4);
+}
+
+/**
+ * 🔹 FUNCIÓN PRINCIPAL CON DIAGNÓSTICO
+ */
+function actualizarBasesAutomatica() {
+  let tempFileId, datosEmp, datosCC;
+  
+  try {
+    const blob = DriveApp.getFileById(ID_EXCEL_DRIVE).getBlob();
+    const tempFolder = DriveApp.getRootFolder();
+    const tempFile = tempFolder.createFile(blob).setName("_temp_sincronizador_auto");
+    tempFileId = tempFile.getId();
+
+    const resource = {
+      title: "_temp_sincronizador_sheets_auto",
+      mimeType: "application/vnd.google-apps.spreadsheet",
+      parents: [{ id: tempFolder.getId() }]
+    };
+    const converted = Drive.Files.copy(resource, tempFileId);
+    const convertedId = converted.id;
+
+    const ssTemp = SpreadsheetApp.openById(convertedId);
+    
+    const hojaTempEmp = ssTemp.getSheetByName(NOMBRE_HOJA_ORIGEN_EMP);
+    if (hojaTempEmp) datosEmp = hojaTempEmp.getDataRange().getValues();
+
+    const hojaTempCC = ssTemp.getSheetByName(NOMBRE_HOJA_ORIGEN_CC);
+    if (hojaTempCC) datosCC = hojaTempCC.getDataRange().getValues();
+    
+    DriveApp.getFileById(tempFileId).setTrashed(true);
+    DriveApp.getFileById(convertedId).setTrashed(true);
+
+  } catch (e) {
+    if (tempFileId) try { DriveApp.getFileById(tempFileId).setTrashed(true); } catch(e2) {}
+    SpreadsheetApp.getUi().alert("❌ Error de lectura de archivo: " + e.message);
+    return;
+  }
+
+  // === DIAGNÓSTICO DE HOJA EMPLEADOS ===
+  if (!datosEmp) {
+    SpreadsheetApp.getUi().alert("❌ No se encontraron datos en la pestaña de origen: " + NOMBRE_HOJA_ORIGEN_EMP);
+    return;
+  }
+
+  const encOrigen = datosEmp[0];
+  const idxContrato = encOrigen.indexOf(COL_CONTRATO);
+  const idxCedula = encOrigen.indexOf(COL_CEDULA);
+
+  // Alerta para verificar si encuentra Contrato y Cédula
+  if (idxContrato === -1 || idxCedula === -1) {
+    SpreadsheetApp.getUi().alert(
+      "⚠️ Error en columnas clave de Empleados:\n\n" +
+      "Buscado '" + COL_CONTRATO + "' -> Encontrado: " + (idxContrato !== -1 ? "SÍ" : "NO") + "\n" +
+      "Buscado '" + COL_CEDULA + "' -> Encontrado: " + (idxCedula !== -1 ? "SÍ" : "NO") + "\n\n" +
+      "Encabezados reales encontrados en tu Excel de origen:\n" + JSON.stringify(encOrigen)
+    );
+    return;
+  }
+
+  // Verificar el resto de columnas de Empleados
+  let columnasFaltantes = [];
+  COLS_A_TRAER_EMP.forEach(col => {
+    if (encOrigen.indexOf(col) === -1) columnasFaltantes.push(col);
+  });
+
+  if (columnasFaltantes.length > 0) {
+    SpreadsheetApp.getUi().alert(
+      "⚠️ Columnas que NO se encontraron en el Excel de Empleados:\n" + 
+      JSON.stringify(columnasFaltantes) + "\n\n" +
+      "Encabezados reales que hay en tu Excel:\n" + JSON.stringify(encOrigen)
+    );
+    return;
+  }
+
+  // === DIAGNÓSTICO DE CENTROS DE COSTO ===
+  if (datosCC) {
+    const encOrigenCC = datosCC[0];
+    let columnasFaltantesCC = [];
+    COLS_A_TRAER_CC.forEach(col => {
+      if (encOrigenCC.indexOf(col) === -1) columnasFaltantesCC.push(col);
+    });
+
+    if (columnasFaltantesCC.length > 0) {
+      SpreadsheetApp.getUi().alert(
+        "⚠️ Columnas que NO se encontraron en Centros de Costo:\n" + 
+        JSON.stringify(columnasFaltantesCC) + "\n\n" +
+        "Encabezados reales de CC en tu Excel:\n" + JSON.stringify(encOrigenCC)
+      );
+      return;
+    }
+  }
+
+  // Si todo el diagnóstico está bien, procede a pegar los datos
+  const ssDestino = SpreadsheetApp.getActiveSpreadsheet();
+  
+  const hojaDestinoEmp = ssDestino.getSheetByName(NOMBRE_HOJA_DESTINO_EMP);
+  if (hojaDestinoEmp) {
+    const indicesDestino = COLS_A_TRAER_EMP.map(col => encOrigen.indexOf(col));
+    const filas = datosEmp.slice(1).filter(fila => fila.some(c => c !== ""));
+    filas.sort((a, b) => (b[idxContrato] - a[idxContrato]));
+    const cedulasVistas = new Set();
+    const filasSinDuplicados = filas.filter(fila => {
+      const cedula = String(fila[idxCedula]).trim();
+      if (cedulasVistas.has(cedula)) return false;
+      cedulasVistas.add(cedula);
+      return true;
+    });
+    const filasProcesadas = filasSinDuplicados.map(fila => indicesDestino.map(idx => fila[idx]));
+    const ultimaFilaEmp = hojaDestinoEmp.getLastRow();
+    if (ultimaFilaEmp > 1) hojaDestinoEmp.getRange(2, 1, ultimaFilaEmp - 1, hojaDestinoEmp.getLastColumn()).clearContent();
+    if (filasProcesadas.length > 0) hojaDestinoEmp.getRange(2, 1, filasProcesadas.length, COLS_A_TRAER_EMP.length).setValues(filasProcesadas);
+  }
+
+  if (datosCC) {
+    const hojaDestinoCC = ssDestino.getSheetByName(NOMBRE_HOJA_DESTINO_CC);
+    if (hojaDestinoCC) {
+      const encOrigenCC = datosCC[0];
+      const indicesDestinoCC = COLS_A_TRAER_CC.map(col => encOrigenCC.indexOf(col));
+      const filasCC = datosCC.slice(1).filter(fila => fila.some(c => c !== ""));
+      const filasProcesadasCC = filasCC.map(fila => indicesDestinoCC.map(idx => fila[idx]));
+      const ultimaFilaCC = hojaDestinoCC.getLastRow();
+      if (ultimaFilaCC > 1) hojaDestinoCC.getRange(2, 1, ultimaFilaCC - 1, hojaDestinoCC.getLastColumn()).clearContent();
+      if (filasProcesadasCC.length > 0) hojaDestinoCC.getRange(2, 1, filasProcesadasCC.length, COLS_A_TRAER_CC.length).setValues(filasProcesadasCC);
+    }
+  }
+}
